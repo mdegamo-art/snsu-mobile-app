@@ -9,92 +9,86 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
-import { Menu, Upload, FileText, AlertTriangle } from 'lucide-react-native';
-import { notesAPI, authAPI } from '../services/api';
+import { Menu, FileText, AlertTriangle, CheckCircle, Clock } from 'lucide-react-native';
 import * as DocumentPicker from 'expo-document-picker';
+import { notesAPI, authAPI } from '../services/api';
 
 const SUBJECTS = ['Advance Database', 'App.Dev', 'Networking', 'Other'];
 
 export default function UploadScreen({ navigation, onOpenSidebar }) {
-  const [title, setTitle] = useState('');
-  const [subject, setSubject] = useState('');
+  const [title, setTitle]           = useState('');
+  const [subject, setSubject]       = useState('');
   const [description, setDescription] = useState('');
-  const [showSubjectDropdown, setShowSubjectDropdown] = useState(false);
-  const [user, setUser] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
-  const [uploading, setUploading] = useState(false);
+  const [uploading, setUploading]   = useState(false);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [user, setUser]             = useState(null);
+  const [lastUpload, setLastUpload] = useState(null); // shows success banner
 
   useEffect(() => {
-    const loadUser = async () => {
-      const currentUser = await authAPI.getCurrentUser();
-      setUser(currentUser);
-    };
-    loadUser();
+    authAPI.getCurrentUser().then(setUser);
   }, []);
 
   const pickDocument = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+        type: [
+          'application/pdf',
+          'application/msword',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ],
         copyToCacheDirectory: true,
       });
-
-      if (result.canceled === false) {
+      if (!result.canceled && result.assets?.[0]) {
         setSelectedFile(result.assets[0]);
       }
-    } catch (error) {
-      console.error('Error picking document:', error);
+    } catch (e) {
       Alert.alert('Error', 'Failed to pick document');
     }
   };
 
   const handleUpload = async () => {
     if (!title.trim() || !subject) {
-      Alert.alert('Error', 'Please fill in all required fields (Title and Subject)');
+      Alert.alert('Required Fields', 'Please fill in Title and Subject');
       return;
     }
-
     if (!selectedFile) {
-      Alert.alert('Error', 'Please select a file to upload');
+      Alert.alert('No File', 'Please select a file to upload');
       return;
     }
-
     if (!user) {
-      Alert.alert('Error', 'You must be logged in to upload notes');
+      Alert.alert('Not Logged In', 'Please log in to upload notes');
       return;
     }
 
     setUploading(true);
-
     try {
-      // Create FormData for file upload
       const formData = new FormData();
       formData.append('title', title.trim());
       formData.append('subject', subject);
       formData.append('description', description.trim());
       formData.append('file', {
-        uri: selectedFile.uri,
+        uri:  selectedFile.uri,
         name: selectedFile.name,
         type: selectedFile.mimeType || 'application/pdf',
       });
 
-      await notesAPI.createNote(formData);
+      const res = await notesAPI.createNote(formData);
 
-      Alert.alert(
-        'Success',
-        'Your notes have been uploaded successfully!',
-        [{ text: 'OK', onPress: () => {
-          setTitle('');
-          setSubject('');
-          setDescription('');
-          setSelectedFile(null);
-          navigation.navigate('Browse');
-        }}]
-      );
-    } catch (error) {
-      console.error('Upload error:', error);
-      Alert.alert('Error', error.response?.data?.message || 'Failed to upload notes. Please try again.');
+      if (res.success) {
+        setLastUpload({ title: title.trim(), subject });
+        setTitle('');
+        setSubject('');
+        setDescription('');
+        setSelectedFile(null);
+      } else {
+        Alert.alert('Upload Failed', res.message || 'Please try again');
+      }
+    } catch (e) {
+      console.error('Upload error:', e);
+      Alert.alert('Upload Failed', e.response?.data?.message || e.message || 'Please try again');
     } finally {
       setUploading(false);
     }
@@ -104,6 +98,8 @@ export default function UploadScreen({ navigation, onOpenSidebar }) {
     setTitle('');
     setSubject('');
     setDescription('');
+    setSelectedFile(null);
+    setLastUpload(null);
   };
 
   return (
@@ -119,43 +115,62 @@ export default function UploadScreen({ navigation, onOpenSidebar }) {
       </View>
 
       <ScrollView style={styles.content} keyboardShouldPersistTaps="handled">
+
+        {/* ── Success / pending banner ─────────────────────────────────── */}
+        {lastUpload && (
+          <View style={styles.successBanner}>
+            <CheckCircle size={22} color="#2d8f3e" style={{ marginRight: 10 }} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.successTitle}>Uploaded successfully!</Text>
+              <Text style={styles.successSub}>
+                "{lastUpload.title}" is now <Text style={styles.pendingWord}>pending admin approval</Text>.
+                It will appear in Browse Notes once approved.
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* ── Pending notice ───────────────────────────────────────────── */}
+        <View style={styles.pendingNotice}>
+          <Clock size={16} color="#f57c00" style={{ marginRight: 8 }} />
+          <Text style={styles.pendingNoticeText}>
+            All uploads require admin approval before they appear in Browse Notes.
+          </Text>
+        </View>
+
+        {/* ── Title ───────────────────────────────────────────────────── */}
         <View style={styles.inputGroup}>
           <Text style={styles.label}>Title <Text style={styles.required}>*</Text></Text>
           <TextInput
             style={styles.input}
-            placeholder="e.g., Introduction to Calculus"
+            placeholder="e.g., Introduction to Databases"
             placeholderTextColor="#999"
             value={title}
             onChangeText={setTitle}
           />
         </View>
 
+        {/* ── Subject dropdown ─────────────────────────────────────────── */}
         <View style={styles.inputGroup}>
           <Text style={styles.label}>Subject <Text style={styles.required}>*</Text></Text>
           <TouchableOpacity
-            style={styles.dropdownButton}
-            onPress={() => setShowSubjectDropdown(!showSubjectDropdown)}
+            style={styles.dropdownBtn}
+            onPress={() => setShowDropdown(!showDropdown)}
           >
-            <Text style={subject ? styles.dropdownTextSelected : styles.dropdownTextPlaceholder}>
+            <Text style={subject ? styles.dropdownSelected : styles.dropdownPlaceholder}>
               {subject || 'Select a subject'}
             </Text>
           </TouchableOpacity>
 
-          {showSubjectDropdown && (
+          {showDropdown && (
             <View style={styles.dropdown}>
               {SUBJECTS.map((s) => (
                 <TouchableOpacity
                   key={s}
                   style={styles.dropdownItem}
-                  onPress={() => {
-                    setSubject(s);
-                    setShowSubjectDropdown(false);
-                  }}
+                  onPress={() => { setSubject(s); setShowDropdown(false); }}
                 >
-                  <Text style={[
-                    styles.dropdownItemText,
-                    subject === s && styles.dropdownItemTextActive
-                  ]}>
+                  <Text style={[styles.dropdownItemText, subject === s && styles.dropdownItemActive]}>
                     {s}
                   </Text>
                 </TouchableOpacity>
@@ -164,6 +179,7 @@ export default function UploadScreen({ navigation, onOpenSidebar }) {
           )}
         </View>
 
+        {/* ── Description ─────────────────────────────────────────────── */}
         <View style={styles.inputGroup}>
           <Text style={styles.label}>Description</Text>
           <TextInput
@@ -178,56 +194,66 @@ export default function UploadScreen({ navigation, onOpenSidebar }) {
           />
         </View>
 
+        {/* ── File picker ─────────────────────────────────────────────── */}
         <View style={styles.inputGroup}>
-          <Text style={styles.label}>Upload File <Text style={styles.required}>*</Text></Text>
-          <TouchableOpacity style={styles.fileUploadArea} onPress={pickDocument}>
-            <View style={styles.fileIconContainer}>
-              <FileText size={24} color="#666" style={{ marginTop: -10 }} />
-            </View>
+          <Text style={styles.label}>File <Text style={styles.required}>*</Text></Text>
+          <TouchableOpacity style={styles.fileArea} onPress={pickDocument}>
+            <FileText size={28} color={selectedFile ? '#1a5f2a' : '#999'} />
             {selectedFile ? (
               <>
-                <Text style={styles.fileUploadTitle} numberOfLines={1}>{selectedFile.name}</Text>
-                <Text style={styles.fileUploadSubtitle}>
-                  {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
+                <Text style={styles.fileName} numberOfLines={1}>{selectedFile.name}</Text>
+                <Text style={styles.fileSize}>
+                  {selectedFile.size
+                    ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB`
+                    : 'Size unknown'}
                 </Text>
               </>
             ) : (
               <>
-                <Text style={styles.fileUploadTitle}>Click to upload file</Text>
-                <Text style={styles.fileUploadSubtitle}>PDF, DOC, or Image (Max 10MB)</Text>
+                <Text style={styles.filePrompt}>Tap to select a file</Text>
+                <Text style={styles.fileHint}>PDF or DOC (max 10 MB)</Text>
               </>
             )}
           </TouchableOpacity>
         </View>
 
-        <View style={styles.buttonContainer}>
-          <TouchableOpacity style={[styles.uploadButton, uploading && styles.uploadButtonDisabled]} onPress={handleUpload} disabled={uploading}>
-            <Text style={styles.uploadButtonText}>{uploading ? 'Uploading...' : 'Upload Notes'}</Text>
+        {/* ── Buttons ─────────────────────────────────────────────────── */}
+        <View style={styles.buttonRow}>
+          <TouchableOpacity
+            style={[styles.uploadBtn, uploading && styles.uploadBtnDisabled]}
+            onPress={handleUpload}
+            disabled={uploading}
+          >
+            {uploading
+              ? <ActivityIndicator color="#fff" />
+              : <Text style={styles.uploadBtnText}>Upload Notes</Text>
+            }
           </TouchableOpacity>
-          <TouchableOpacity style={styles.clearButton} onPress={handleClear}>
-            <Text style={styles.clearButtonText}>Clear</Text>
+          <TouchableOpacity style={styles.clearBtn} onPress={handleClear}>
+            <Text style={styles.clearBtnText}>Clear</Text>
           </TouchableOpacity>
         </View>
 
-        <View style={styles.infoBox}>
-          <View style={styles.infoHeader}>
-            <AlertTriangle size={16} color="#f57c00" />
-            <Text style={styles.infoTitle}>Important:</Text>
+        {/* ── Warning ─────────────────────────────────────────────────── */}
+        <View style={styles.warningBox}>
+          <View style={styles.warningHeader}>
+            <AlertTriangle size={15} color="#f57c00" />
+            <Text style={styles.warningTitle}> Important</Text>
           </View>
-          <Text style={styles.infoText}>
-            All uploads are tied to your verified school account. Please ensure you upload only relevant academic materials. Inappropriate content will result in suspension.
+          <Text style={styles.warningText}>
+            All uploads are tied to your verified school account. Please upload only relevant
+            academic materials. Inappropriate content will result in account suspension.
           </Text>
         </View>
+
+        <View style={{ height: 40 }} />
       </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f5f5f5',
-  },
+  container: { flex: 1, backgroundColor: '#f5f5f5' },
   header: {
     backgroundColor: '#1a5f2a',
     paddingTop: 50,
@@ -236,87 +262,74 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 20,
     borderBottomRightRadius: 20,
   },
-  menuButton: {
-    marginBottom: 10,
+  menuButton:  { marginBottom: 10 },
+  headerTitle: { fontSize: 28, fontWeight: 'bold', color: '#fff' },
+  content:     { flex: 1, padding: 20 },
+
+  successBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#e8f5e9',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: '#2d8f3e',
   },
-  headerTitle: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#fff',
+  successTitle: { fontSize: 14, fontWeight: 'bold', color: '#1a5f2a', marginBottom: 4 },
+  successSub:   { fontSize: 13, color: '#555', lineHeight: 19 },
+  pendingWord:  { fontWeight: 'bold', color: '#f57c00' },
+
+  pendingNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff8e1',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 18,
+    borderLeftWidth: 3,
+    borderLeftColor: '#ffc107',
   },
-  content: {
-    flex: 1,
-    padding: 20,
-  },
-  inputGroup: {
-    marginBottom: 20,
-  },
-  label: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#2d8f3e',
-    marginBottom: 8,
-  },
-  required: {
-    color: '#d32f2f',
-  },
+  pendingNoticeText: { flex: 1, fontSize: 13, color: '#666' },
+
+  inputGroup:  { marginBottom: 20 },
+  label:       { fontSize: 14, fontWeight: '600', color: '#2d8f3e', marginBottom: 8 },
+  required:    { color: '#d32f2f' },
   input: {
     backgroundColor: '#fff',
     borderRadius: 12,
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingVertical: 13,
     fontSize: 15,
     borderWidth: 1,
     borderColor: '#e0e0e0',
     color: '#333',
   },
-  textArea: {
-    height: 100,
-    paddingTop: 14,
-  },
-  dropdownButton: {
+  textArea: { height: 100, paddingTop: 13 },
+
+  dropdownBtn: {
     backgroundColor: '#fff',
     borderRadius: 12,
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingVertical: 13,
     borderWidth: 1,
     borderColor: '#e0e0e0',
   },
-  dropdownTextPlaceholder: {
-    fontSize: 15,
-    color: '#999',
-  },
-  dropdownTextSelected: {
-    fontSize: 15,
-    color: '#333',
-  },
+  dropdownSelected:   { fontSize: 15, color: '#333' },
+  dropdownPlaceholder:{ fontSize: 15, color: '#999' },
   dropdown: {
     backgroundColor: '#fff',
     borderRadius: 12,
     marginTop: 5,
     borderWidth: 1,
     borderColor: '#e0e0e0',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
     elevation: 5,
   },
-  dropdownItem: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-  },
-  dropdownItemText: {
-    fontSize: 15,
-    color: '#666',
-  },
-  dropdownItemTextActive: {
-    color: '#2d8f3e',
-    fontWeight: '600',
-  },
-  fileUploadArea: {
+  dropdownItem:     { paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#f0f0f0' },
+  dropdownItemText: { fontSize: 15, color: '#666' },
+  dropdownItemActive:{ color: '#2d8f3e', fontWeight: '600' },
+
+  fileArea: {
     backgroundColor: '#f5f5f5',
     borderRadius: 15,
     padding: 30,
@@ -325,42 +338,25 @@ const styles = StyleSheet.create({
     borderColor: '#c8e6c9',
     alignItems: 'center',
   },
-  fileIconContainer: {
-    alignItems: 'center',
-    marginBottom: 15,
-  },
-  fileUploadTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 5,
-  },
-  fileUploadSubtitle: {
-    fontSize: 13,
-    color: '#888',
-  },
-  buttonContainer: {
-    flexDirection: 'row',
-    marginBottom: 20,
-  },
-  uploadButton: {
+  fileName:   { fontSize: 14, fontWeight: '600', color: '#333', marginTop: 10, textAlign: 'center' },
+  fileSize:   { fontSize: 12, color: '#888', marginTop: 4 },
+  filePrompt: { fontSize: 15, fontWeight: '600', color: '#555', marginTop: 10 },
+  fileHint:   { fontSize: 12, color: '#999', marginTop: 4 },
+
+  buttonRow: { flexDirection: 'row', marginBottom: 20 },
+  uploadBtn: {
     flex: 1,
     backgroundColor: '#2d8f3e',
     borderRadius: 12,
     paddingVertical: 14,
     alignItems: 'center',
     marginRight: 10,
+    elevation: 2,
   },
-  uploadButtonDisabled: {
-    backgroundColor: '#a5d6a7',
-  },
-  uploadButtonText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: 'bold',
-  },
-  clearButton: {
-    width: 100,
+  uploadBtnDisabled: { backgroundColor: '#a5d6a7' },
+  uploadBtnText: { color: '#fff', fontSize: 15, fontWeight: 'bold' },
+  clearBtn: {
+    width: 90,
     backgroundColor: '#fff',
     borderRadius: 12,
     paddingVertical: 14,
@@ -368,33 +364,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e0e0e0',
   },
-  clearButtonText: {
-    color: '#666',
-    fontSize: 15,
-    fontWeight: '500',
-  },
-  infoBox: {
+  clearBtnText: { color: '#666', fontSize: 15, fontWeight: '500' },
+
+  warningBox: {
     backgroundColor: '#fff8e1',
     borderRadius: 12,
     padding: 16,
     borderLeftWidth: 4,
     borderLeftColor: '#ffc107',
-    marginBottom: 30,
+    marginBottom: 10,
   },
-  infoHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  infoTitle: {
-    fontSize: 13,
-    fontWeight: 'bold',
-    color: '#f57c00',
-    marginLeft: 6,
-  },
-  infoText: {
-    fontSize: 12,
-    color: '#666',
-    lineHeight: 18,
-  },
+  warningHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
+  warningTitle:  { fontSize: 13, fontWeight: 'bold', color: '#f57c00' },
+  warningText:   { fontSize: 12, color: '#666', lineHeight: 18 },
 });

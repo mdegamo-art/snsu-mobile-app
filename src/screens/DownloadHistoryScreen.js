@@ -7,18 +7,21 @@ import {
   ScrollView,
   RefreshControl,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
-import { Menu, FileText, Download, X, BookOpen } from 'lucide-react-native';
-import { authAPI, userActionsAPI } from '../services/api';
+import { Menu, FileText, Download, BookOpen } from 'lucide-react-native';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { authAPI, userActionsAPI, STORAGE_BASE } from '../services/api';
 
 export default function DownloadHistoryScreen({ navigation, onOpenSidebar }) {
-  const [downloads, setDownloads] = useState([]);
-  const [stats, setStats] = useState({
-    mostDownloaded: [],
-    totalDownloads: 0,
-  });
+  const [downloads, setDownloads]   = useState([]);
+  const [stats, setStats]           = useState({ mostDownloaded: [], total: 0 });
   const [refreshing, setRefreshing] = useState(false);
-  const [user, setUser] = useState(null);
+  const [loading, setLoading]       = useState(true);
+  const [downloadingId, setDownloadingId] = useState(null);
+  const [user, setUser]             = useState(null);
 
   const loadData = useCallback(async () => {
     try {
@@ -26,53 +29,60 @@ export default function DownloadHistoryScreen({ navigation, onOpenSidebar }) {
       setUser(currentUser);
 
       if (currentUser) {
-        const response = await userActionsAPI.getDownloadHistory();
-        const downloadHistory = response.downloads || [];
+        const res = await userActionsAPI.getDownloadHistory();
+        const raw = res.downloads || res.history?.data || [];
 
-        // Transform API downloads to match expected format
-        const downloadedNotes = downloadHistory.map(download => ({
-          downloadId: download.id?.toString() || `${download.note_id}-${download.created_at}`,
-          id: download.note?.id?.toString() || download.note_id?.toString(),
-          title: download.note?.title || 'Untitled',
-          subject: download.note?.subject || 'Other',
-          description: download.note?.description || '',
-          fileName: download.note?.file ? download.note.file.split('/').pop() : 'file.pdf',
-          fileType: 'pdf',
-          fileSize: download.note?.file_size || 'Unknown',
-          uploadDate: download.note?.created_at ? new Date(download.note.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown',
-          downloadDate: download.created_at ? new Date(download.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown',
-          uploaderId: download.note?.user_id?.toString() || 'unknown',
-          uploaderName: download.note?.user?.name || 'Unknown',
-          downloads: download.note?.downloads || 0,
-        })).filter(note => note.id);
+        const formatted = raw
+          .filter((d) => d.note || d.note_id)
+          .map((d) => {
+            const note = d.note || {};
+            return {
+              downloadId:  String(d.id || `${d.note_id}-${d.created_at}`),
+              id:          String(note.id || d.note_id),
+              title:       note.title || 'Untitled',
+              subject:     note.subject || 'Other',
+              description: note.description || '',
+              file_path:   note.file_path || '',
+              file_type:   note.file_type || 'pdf',
+              uploadDate:  note.created_at
+                ? new Date(note.created_at).toLocaleDateString('en-US', {
+                    month: 'short', day: 'numeric', year: 'numeric',
+                  })
+                : 'Unknown',
+              downloadDate: d.downloaded_at || d.created_at
+                ? new Date(d.downloaded_at || d.created_at).toLocaleDateString('en-US', {
+                    month: 'short', day: 'numeric', year: 'numeric',
+                  })
+                : 'Unknown',
+              uploaderName: note.user?.name || 'Unknown',
+            };
+          });
 
-        setDownloads(downloadedNotes);
+        setDownloads(formatted);
 
-        // Calculate most downloaded subjects
-        const subjectCount = {};
-        downloadedNotes.forEach(note => {
-          subjectCount[note.subject] = (subjectCount[note.subject] || 0) + 1;
+        // Build most downloaded subjects from local data
+        const subjectMap = {};
+        formatted.forEach((n) => {
+          subjectMap[n.subject] = (subjectMap[n.subject] || 0) + 1;
         });
-
-        const mostDownloaded = Object.entries(subjectCount)
+        const mostDownloaded = Object.entries(subjectMap)
           .sort((a, b) => b[1] - a[1])
           .slice(0, 3)
           .map(([subject, count]) => ({ subject, count }));
 
-        setStats({
-          mostDownloaded,
-          totalDownloads: downloadedNotes.length,
-        });
+        setStats({ mostDownloaded, total: formatted.length });
       }
-    } catch (error) {
-      console.error('Error loading download history:', error);
+    } catch (e) {
+      console.error('DownloadHistoryScreen loadData:', e);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     loadData();
-    const unsubscribe = navigation.addListener('focus', loadData);
-    return unsubscribe;
+    const unsub = navigation.addListener('focus', loadData);
+    return unsub;
   }, [navigation, loadData]);
 
   const onRefresh = async () => {
@@ -81,57 +91,62 @@ export default function DownloadHistoryScreen({ navigation, onOpenSidebar }) {
     setRefreshing(false);
   };
 
-  const handleRemoveFromHistory = (noteId) => {
-    // Just remove from display, actual removal would need additional storage logic
-    setDownloads(downloads.filter(note => note.id !== noteId));
-  };
-
   const handleDownload = async (note) => {
-    if (!user) return;
-
+    setDownloadingId(note.id);
     try {
       await userActionsAPI.recordDownload(parseInt(note.id));
-      Alert.alert(
-        'Download Recorded',
-        `Download recorded for "${note.title}"`,
-        [{ text: 'OK' }]
-      );
-    } catch (error) {
-      console.error('Error recording download:', error);
+      const fileUrl  = note.file_path.startsWith('http') ? note.file_path : `${STORAGE_BASE}${note.file_path}`;
+      const fileName = note.file_path.split('/').pop() || `${note.title}.pdf`;
+      const localUri = FileSystem.cacheDirectory + fileName;
+      const token    = await AsyncStorage.getItem('@auth_token');
+
+      const { uri } = await FileSystem.downloadAsync(fileUrl, localUri, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `Save "${note.title}"` });
+      } else {
+        Alert.alert('Downloaded', 'File saved to cache.');
+      }
+    } catch (e) {
+      Alert.alert('Error', 'Download failed: ' + (e.message || 'Unknown'));
+    } finally {
+      setDownloadingId(null);
     }
   };
 
   const NoteCard = ({ note }) => (
     <View style={styles.noteCard}>
-      <View style={styles.noteIconContainer}>
-        <FileText size={32} color="#1565c0" />
+      <View style={styles.noteIcon}>
+        <FileText size={30} color="#1565c0" />
       </View>
-      
-      <Text style={styles.noteTitle}>{note.title}</Text>
-      
+      <Text style={styles.noteTitle} numberOfLines={2}>{note.title}</Text>
       <View style={styles.subjectTag}>
-        <Text style={styles.subjectText}>{note.subject}</Text>
+        <Text style={styles.subjectTagText}>{note.subject}</Text>
       </View>
-      
-      <Text style={styles.noteDate}>{note.uploadDate}</Text>
-      
+      <Text style={styles.noteDate}>Downloaded: {note.downloadDate}</Text>
+
       <TouchableOpacity
-        style={styles.downloadButton}
+        style={styles.downloadBtn}
         onPress={() => handleDownload(note)}
+        disabled={downloadingId === note.id}
       >
-        <Download size={18} color="#1565c0" />
-        <Text style={styles.downloadText}>Download</Text>
-      </TouchableOpacity>
-      
-      <TouchableOpacity
-        style={styles.removeButton}
-        onPress={() => handleRemoveFromHistory(note.id)}
-      >
-        <X size={18} color="#d32f2f" />
-        <Text style={styles.removeText}>Remove</Text>
+        {downloadingId === note.id
+          ? <ActivityIndicator size="small" color="#1565c0" />
+          : <><Download size={14} color="#1565c0" /><Text style={styles.downloadText}> Re-download</Text></>
+        }
       </TouchableOpacity>
     </View>
   );
+
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#2962ff" />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -143,16 +158,16 @@ export default function DownloadHistoryScreen({ navigation, onOpenSidebar }) {
 
       <View style={styles.titleSection}>
         <Text style={styles.pageTitle}>Download History</Text>
-        
+
         {stats.mostDownloaded.length > 0 && (
           <View style={styles.statsCard}>
             <Text style={styles.statsTitle}>Most Downloaded Subjects</Text>
-            <View style={styles.booksIcon}>
-              <BookOpen size={28} color="#ff9800" />
+            <View style={styles.booksIconWrap}>
+              <BookOpen size={26} color="#ff9800" />
             </View>
             <View style={styles.subjectsList}>
-              {stats.mostDownloaded.map((item, index) => (
-                <View key={index} style={styles.subjectItem}>
+              {stats.mostDownloaded.map((item, i) => (
+                <View key={i} style={styles.subjectItem}>
                   <Text style={styles.subjectName}>{item.subject}</Text>
                   <Text style={styles.subjectCount}>({item.count})</Text>
                 </View>
@@ -164,17 +179,13 @@ export default function DownloadHistoryScreen({ navigation, onOpenSidebar }) {
 
       <ScrollView
         style={styles.content}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-        }
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />}
       >
         {downloads.length === 0 ? (
           <View style={styles.emptyState}>
             <Download size={60} color="rgba(255,255,255,0.3)" />
             <Text style={styles.emptyTitle}>No Downloads Yet</Text>
-            <Text style={styles.emptyText}>
-              Your downloaded notes will appear here.
-            </Text>
+            <Text style={styles.emptyText}>Your downloaded notes will appear here.</Text>
           </View>
         ) : (
           <View style={styles.grid}>
@@ -183,87 +194,35 @@ export default function DownloadHistoryScreen({ navigation, onOpenSidebar }) {
             ))}
           </View>
         )}
-        <View style={styles.bottomPadding} />
+        <View style={{ height: 30 }} />
       </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#2962ff',
-  },
-  header: {
-    paddingTop: 50,
-    paddingBottom: 10,
-    paddingHorizontal: 20,
-  },
-  menuButton: {
-    marginBottom: 10,
-  },
-  titleSection: {
-    paddingHorizontal: 20,
-    paddingBottom: 20,
-  },
-  pageTitle: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 20,
-  },
-  statsCard: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 20,
-    alignItems: 'center',
-  },
-  statsTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 15,
-  },
-  booksIcon: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+  container:        { flex: 1, backgroundColor: '#2962ff' },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  header:           { paddingTop: 50, paddingBottom: 10, paddingHorizontal: 20 },
+  menuButton:       { marginBottom: 10 },
+  titleSection:     { paddingHorizontal: 20, paddingBottom: 20 },
+  pageTitle:        { fontSize: 32, fontWeight: 'bold', color: '#fff', marginBottom: 20 },
+  statsCard:        { backgroundColor: '#fff', borderRadius: 20, padding: 20, alignItems: 'center' },
+  statsTitle:       { fontSize: 16, fontWeight: 'bold', color: '#333', marginBottom: 12 },
+  booksIconWrap: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     backgroundColor: '#fff3e0',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 15,
+    marginBottom: 12,
   },
-  subjectsList: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    gap: 10,
-  },
-  subjectItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#f5f5f5',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 15,
-  },
-  subjectName: {
-    fontSize: 13,
-    color: '#333',
-    fontWeight: '500',
-  },
-  subjectCount: {
-    fontSize: 12,
-    color: '#666',
-    marginLeft: 4,
-  },
-  content: {
-    flex: 1,
-    backgroundColor: '#1a237e',
-    borderTopLeftRadius: 25,
-    borderTopRightRadius: 25,
-    paddingTop: 20,
-  },
+  subjectsList: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8 },
+  subjectItem:  { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f5f5f5', paddingHorizontal: 12, paddingVertical: 5, borderRadius: 15 },
+  subjectName:  { fontSize: 13, color: '#333', fontWeight: '500' },
+  subjectCount: { fontSize: 12, color: '#666', marginLeft: 4 },
+  content:      { flex: 1, backgroundColor: '#1a237e', borderTopLeftRadius: 25, borderTopRightRadius: 25, paddingTop: 20 },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -275,92 +234,29 @@ const styles = StyleSheet.create({
     width: '48%',
     backgroundColor: '#fff',
     borderRadius: 15,
-    padding: 15,
+    padding: 14,
     marginBottom: 15,
     alignItems: 'center',
-    position: 'relative',
+    elevation: 3,
   },
-  noteIconContainer: {
-    marginTop: 10,
-    marginBottom: 10,
-  },
-  noteTitle: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#333',
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  subjectTag: {
-    backgroundColor: '#7e57c2',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 15,
-    marginBottom: 8,
-  },
-  subjectText: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  noteDate: {
-    fontSize: 11,
-    color: '#aaa',
-    marginBottom: 10,
-  },
-  downloadButton: {
+  noteIcon:      { marginTop: 8, marginBottom: 8 },
+  noteTitle:     { fontSize: 13, fontWeight: 'bold', color: '#333', textAlign: 'center', marginBottom: 8 },
+  subjectTag:    { backgroundColor: '#7e57c2', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 12, marginBottom: 6 },
+  subjectTagText:{ color: '#fff', fontSize: 10, fontWeight: '600' },
+  noteDate:      { fontSize: 10, color: '#aaa', marginBottom: 10, textAlign: 'center' },
+  downloadBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#e3f2fd',
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    borderRadius: 8,
-    marginBottom: 6,
-    width: '100%',
-    justifyContent: 'center',
-  },
-  downloadText: {
-    color: '#1565c0',
-    fontSize: 12,
-    fontWeight: '500',
-    marginLeft: 5,
-  },
-  removeButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#ffebee',
-    paddingHorizontal: 15,
-    paddingVertical: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
     borderRadius: 8,
     width: '100%',
     justifyContent: 'center',
+    minHeight: 38,
   },
-  removeText: {
-    color: '#d32f2f',
-    fontSize: 12,
-    fontWeight: '500',
-    marginLeft: 5,
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 60,
-    paddingHorizontal: 40,
-  },
-  emptyTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginTop: 20,
-    marginBottom: 10,
-  },
-  emptyText: {
-    fontSize: 14,
-    color: 'rgba(255,255,255,0.7)',
-    textAlign: 'center',
-    lineHeight: 22,
-  },
-  bottomPadding: {
-    height: 30,
-  },
+  downloadText: { color: '#1565c0', fontSize: 12, fontWeight: '500' },
+  emptyState:   { alignItems: 'center', justifyContent: 'center', paddingVertical: 60, paddingHorizontal: 40 },
+  emptyTitle:   { fontSize: 20, fontWeight: 'bold', color: '#fff', marginTop: 20, marginBottom: 10 },
+  emptyText:    { fontSize: 14, color: 'rgba(255,255,255,0.7)', textAlign: 'center', lineHeight: 22 },
 });

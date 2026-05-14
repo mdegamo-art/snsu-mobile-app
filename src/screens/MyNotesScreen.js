@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,148 +6,193 @@ import {
   TouchableOpacity,
   ScrollView,
   RefreshControl,
+  ActivityIndicator,
 } from 'react-native';
-import { FileText, Eye, Heart, Trash2 } from 'lucide-react-native';
-import { storage } from '../utils/storage';
-import { notesAPI, authAPI } from '../services/api';
+import { Menu, FileText, Eye, Heart, Clock, CheckCircle, XCircle, Download } from 'lucide-react-native';
+import { authAPI, notesAPI } from '../services/api';
+
+const STATUS_CONFIG = {
+  pending:  { label: 'Pending',  color: '#f57c00', bg: '#fff8e1', Icon: Clock },
+  approved: { label: 'Approved', color: '#2d8f3e', bg: '#e8f5e9', Icon: CheckCircle },
+  rejected: { label: 'Rejected', color: '#d32f2f', bg: '#ffebee', Icon: XCircle },
+};
+
+function StatusBadge({ status }) {
+  const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.pending;
+  const Icon = cfg.Icon;
+  return (
+    <View style={[styles.statusBadge, { backgroundColor: cfg.bg }]}>
+      <Icon size={12} color={cfg.color} />
+      <Text style={[styles.statusText, { color: cfg.color }]}>{cfg.label}</Text>
+    </View>
+  );
+}
 
 export default function MyNotesScreen({ navigation, onOpenSidebar }) {
-  const [myNotes, setMyNotes] = useState([]);
+  const [myNotes, setMyNotes]     = useState([]);
   const [refreshing, setRefreshing] = useState(false);
-  const [currentUser, setCurrentUser] = useState(null);
+  const [loading, setLoading]     = useState(true);
+  const [user, setUser]           = useState(null);
 
-  const loadMyNotes = async () => {
+  const loadMyNotes = useCallback(async () => {
     try {
-      const user = await authAPI.getCurrentUser();
-      setCurrentUser(user);
-      if (user) {
-        const notesResponse = await notesAPI.getNotes();
-        const allNotes = notesResponse.notes || [];
-        // Filter notes by current user - API returns user_id
-        const userNotes = allNotes
-          .filter(note => note.user_id?.toString() === user.id?.toString())
-          .map(note => ({
-            id: note.id.toString(),
-            title: note.title,
-            subject: note.subject || 'Other',
-            description: note.description || '',
-            fileName: note.file ? note.file.split('/').pop() : 'file.pdf',
-            fileType: 'pdf',
-            fileSize: note.file_size || 'Unknown',
-            uploadDate: note.created_at ? new Date(note.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown',
-            uploaderId: note.user_id?.toString(),
-            uploaderName: note.user?.name || 'Unknown',
-            downloads: note.downloads || 0,
-            views: note.views || 0,
-            favorites: note.favorites || 0,
-          }));
-        setMyNotes(userNotes);
+      const currentUser = await authAPI.getCurrentUser();
+      setUser(currentUser);
+
+      if (currentUser) {
+        // Use dedicated my-notes endpoint which returns all statuses for the user
+        const res = await notesAPI.getMyNotes();
+        const raw = res.notes || res.data || [];
+
+        const formatted = raw.map((n) => ({
+          id:          n.id,
+          title:       n.title,
+          subject:     n.subject || 'Other',
+          description: n.description || '',
+          status:      n.status || 'pending',
+          uploadDate:  n.created_at
+            ? new Date(n.created_at).toLocaleDateString('en-US', {
+                month: 'short', day: 'numeric', year: 'numeric',
+              })
+            : 'Unknown',
+          downloads: n.download_count || 0,
+          views:     n.views || 0,
+          favorites: n.favorites_count || n.favorites || 0,
+        }));
+
+        setMyNotes(formatted);
       }
-    } catch (error) {
-      console.error('Error loading my notes:', error);
+    } catch (e) {
+      console.error('MyNotesScreen loadMyNotes:', e);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
-    setRefreshing(false);
-  };
+  }, []);
 
   useEffect(() => {
     loadMyNotes();
-  }, []);
+    const unsub = navigation.addListener('focus', loadMyNotes);
+    return unsub;
+  }, [navigation, loadMyNotes]);
 
-  const onRefresh = () => {
-    setRefreshing(true);
-    loadMyNotes();
-  };
+  const onRefresh = () => { setRefreshing(true); loadMyNotes(); };
 
-  const handleDeleteNote = async (noteId) => {
-    // In a real app, implement delete functionality
-    alert('Delete functionality would be implemented here');
-  };
+  const pendingCount  = myNotes.filter((n) => n.status === 'pending').length;
+  const approvedCount = myNotes.filter((n) => n.status === 'approved').length;
+  const rejectedCount = myNotes.filter((n) => n.status === 'rejected').length;
+
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#2d8f3e" />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={onOpenSidebar} style={styles.menuButton}>
-          <View style={styles.menuIcon}>
-            <View style={styles.menuLine} />
-            <View style={[styles.menuLine, { width: 18 }]} />
-            <View style={styles.menuLine} />
-          </View>
+          <Menu size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>My Notes</Text>
       </View>
 
       <ScrollView
         style={styles.content}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2d8f3e" />}
       >
-        <View style={styles.statsCard}>
-          <View style={styles.statItem}>
-            <Text style={styles.statNumber}>{myNotes.length}</Text>
-            <Text style={styles.statLabel}>Uploaded Notes</Text>
+        {/* ── Stats summary ─────────────────────────────── */}
+        <View style={styles.statsRow}>
+          <View style={[styles.statBox, { borderTopColor: '#2d8f3e' }]}>
+            <Text style={[styles.statNum, { color: '#2d8f3e' }]}>{approvedCount}</Text>
+            <Text style={styles.statLbl}>Approved</Text>
           </View>
-          <View style={styles.statDivider} />
-          <View style={styles.statItem}>
-            <Text style={styles.statNumber}>
-              {myNotes.reduce((sum, note) => sum + (note.views || 0), 0)}
-            </Text>
-            <Text style={styles.statLabel}>Total Views</Text>
+          <View style={[styles.statBox, { borderTopColor: '#f57c00' }]}>
+            <Text style={[styles.statNum, { color: '#f57c00' }]}>{pendingCount}</Text>
+            <Text style={styles.statLbl}>Pending</Text>
+          </View>
+          <View style={[styles.statBox, { borderTopColor: '#d32f2f' }]}>
+            <Text style={[styles.statNum, { color: '#d32f2f' }]}>{rejectedCount}</Text>
+            <Text style={styles.statLbl}>Rejected</Text>
           </View>
         </View>
 
+        {/* ── Pending explanation ───────────────────────── */}
+        {pendingCount > 0 && (
+          <View style={styles.pendingInfo}>
+            <Clock size={14} color="#f57c00" style={{ marginRight: 6 }} />
+            <Text style={styles.pendingInfoText}>
+              {pendingCount} note{pendingCount > 1 ? 's are' : ' is'} awaiting admin approval and won't
+              appear in Browse Notes yet.
+            </Text>
+          </View>
+        )}
+
+        {/* ── Empty state ───────────────────────────────── */}
         {myNotes.length === 0 ? (
           <View style={styles.emptyState}>
             <FileText size={64} color="#ddd" />
             <Text style={styles.emptyTitle}>No notes uploaded yet</Text>
-            <Text style={styles.emptySubtitle}>
-              Start sharing your notes with the community!
-            </Text>
+            <Text style={styles.emptySub}>Start sharing your notes with the community!</Text>
             <TouchableOpacity
-              style={styles.uploadButton}
+              style={styles.uploadBtn}
               onPress={() => navigation.navigate('MainTabs', { screen: 'Upload' })}
             >
-              <Text style={styles.uploadButtonText}>Upload Notes</Text>
+              <Text style={styles.uploadBtnText}>Upload Notes</Text>
             </TouchableOpacity>
           </View>
         ) : (
           <View style={styles.notesList}>
             {myNotes.map((note) => (
               <View key={note.id} style={styles.noteCard}>
-                <View style={styles.noteHeader}>
+                <View style={styles.noteCardHeader}>
                   <View style={styles.subjectBadge}>
                     <Text style={styles.subjectText}>{note.subject}</Text>
                   </View>
-                  <TouchableOpacity onPress={() => handleDeleteNote(note.id)}>
-                    <Trash2 size={18} color="#d32f2f" />
-                  </TouchableOpacity>
+                  <StatusBadge status={note.status} />
                 </View>
+
                 <Text style={styles.noteTitle}>{note.title}</Text>
-                <Text style={styles.noteDescription} numberOfLines={2}>
-                  {note.description}
-                </Text>
+
+                {note.description ? (
+                  <Text style={styles.noteDesc} numberOfLines={2}>{note.description}</Text>
+                ) : null}
+
                 <View style={styles.noteFooter}>
-                  <View style={styles.stat}>
-                    <Eye size={14} color="#666" />
-                    <Text style={styles.statText}>{note.views || 0} views</Text>
+                  <View style={styles.footerStat}>
+                    <Download size={13} color="#666" />
+                    <Text style={styles.footerStatText}>{note.downloads} downloads</Text>
                   </View>
-                  <View style={styles.stat}>
-                    <Heart size={14} color="#d32f2f" />
-                    <Text style={styles.statText}>{note.favorites || 0} favorites</Text>
+                  <View style={styles.footerStat}>
+                    <Heart size={13} color="#d32f2f" />
+                    <Text style={styles.footerStatText}>{note.favorites} favorites</Text>
                   </View>
+                  <Text style={styles.noteDate}>{note.uploadDate}</Text>
                 </View>
+
+                {note.status === 'rejected' && (
+                  <View style={styles.rejectedHint}>
+                    <Text style={styles.rejectedHintText}>
+                      This note was not approved by the admin. You may re-upload with corrections.
+                    </Text>
+                  </View>
+                )}
               </View>
             ))}
           </View>
         )}
+
+        <View style={{ height: 30 }} />
       </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f5f5f5',
-  },
+  container:        { flex: 1, backgroundColor: '#f5f5f5' },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   header: {
     backgroundColor: '#2d8f3e',
     paddingTop: 50,
@@ -156,92 +201,53 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
-  menuButton: {
-    marginRight: 15,
-    padding: 5,
-  },
-  menuIcon: {
-    width: 24,
-    height: 18,
-    justifyContent: 'space-between',
-  },
-  menuLine: {
-    width: 24,
-    height: 2,
-    backgroundColor: '#fff',
-    borderRadius: 1,
-  },
-  headerTitle: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: 'bold',
-  },
-  content: {
+  menuButton:  { marginRight: 15, padding: 5 },
+  headerTitle: { color: '#fff', fontSize: 20, fontWeight: 'bold' },
+  content:     { flex: 1 },
+
+  statsRow: { flexDirection: 'row', padding: 15, gap: 10 },
+  statBox: {
     flex: 1,
-  },
-  statsCard: {
     backgroundColor: '#fff',
-    margin: 15,
     borderRadius: 12,
-    padding: 20,
-    flexDirection: 'row',
+    padding: 14,
+    alignItems: 'center',
+    borderTopWidth: 3,
     elevation: 2,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
   },
-  statItem: {
-    flex: 1,
+  statNum: { fontSize: 26, fontWeight: 'bold' },
+  statLbl: { fontSize: 11, color: '#666', marginTop: 4 },
+
+  pendingInfo: {
+    flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: '#fff8e1',
+    marginHorizontal: 15,
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 10,
+    borderLeftWidth: 3,
+    borderLeftColor: '#ffc107',
   },
-  statDivider: {
-    width: 1,
-    backgroundColor: '#e0e0e0',
-  },
-  statNumber: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#2d8f3e',
-  },
-  statLabel: {
-    fontSize: 12,
-    color: '#666',
-    marginTop: 5,
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 60,
-    paddingHorizontal: 30,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#333',
-    marginTop: 20,
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    color: '#666',
-    textAlign: 'center',
-    marginTop: 8,
-  },
-  uploadButton: {
+  pendingInfoText: { flex: 1, fontSize: 12, color: '#666', lineHeight: 18 },
+
+  emptyState: { alignItems: 'center', justifyContent: 'center', paddingVertical: 60, paddingHorizontal: 30 },
+  emptyTitle: { fontSize: 18, fontWeight: '600', color: '#333', marginTop: 20 },
+  emptySub:   { fontSize: 14, color: '#666', textAlign: 'center', marginTop: 8 },
+  uploadBtn: {
     backgroundColor: '#2d8f3e',
     paddingHorizontal: 30,
     paddingVertical: 12,
     borderRadius: 8,
     marginTop: 20,
   },
-  uploadButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  notesList: {
-    padding: 15,
-  },
+  uploadBtnText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+
+  notesList: { padding: 15 },
   noteCard: {
     backgroundColor: '#fff',
     borderRadius: 12,
@@ -249,50 +255,32 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     elevation: 2,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
     shadowRadius: 4,
   },
-  noteHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
+  noteCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  subjectBadge:   { backgroundColor: '#e8f5e9', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6 },
+  subjectText:    { color: '#2d8f3e', fontSize: 12, fontWeight: '600' },
+
+  statusBadge:  { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, gap: 4 },
+  statusText:   { fontSize: 11, fontWeight: '600' },
+
+  noteTitle: { fontSize: 16, fontWeight: '600', color: '#333', marginBottom: 6 },
+  noteDesc:  { fontSize: 13, color: '#888', marginBottom: 10, lineHeight: 19 },
+
+  noteFooter:     { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12 },
+  footerStat:     { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  footerStatText: { fontSize: 12, color: '#666' },
+  noteDate:       { fontSize: 11, color: '#aaa', marginLeft: 'auto' },
+
+  rejectedHint: {
+    backgroundColor: '#ffebee',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 10,
+    borderLeftWidth: 3,
+    borderLeftColor: '#d32f2f',
   },
-  subjectBadge: {
-    backgroundColor: '#e8f5e9',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 4,
-  },
-  subjectText: {
-    color: '#2d8f3e',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  noteTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 6,
-  },
-  noteDescription: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 12,
-    lineHeight: 20,
-  },
-  noteFooter: {
-    flexDirection: 'row',
-    gap: 15,
-  },
-  stat: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  statText: {
-    fontSize: 12,
-    color: '#666',
-  },
+  rejectedHintText: { fontSize: 12, color: '#c62828', lineHeight: 18 },
 });

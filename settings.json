@@ -1,0 +1,16 @@
+{
+  "typescript.tsserver.watchOptions": {},
+  "typescript.disableAutomaticTypeAcquisition": false,
+
+  // Tells TS language server to exclude node_modules from being analyzed
+  "typescript.tsdk": "node_modules/typescript/lib",
+
+  // Exclude node_modules from search, file watcher, and TS crawl
+  "search.exclude": {
+    "**/node_modules": true
+  },
+  "files.watcherExclude": {
+    "**/node_modules/**": true
+  },
+  "typescript.preferences.excludeLibrarySymbolsInNavTo": true
+}
